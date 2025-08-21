@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"path"
+	"strings"
 	"time"
 
 	"github.com/cloudreve/Cloudreve/v4/ent"
@@ -154,6 +155,18 @@ func (f *DBFS) PrepareUpload(ctx context.Context, req *fs.UploadRequest, opts ..
 		}
 	}
 
+	// For OneDrive Mux policy, determine subaccount and prefix save path with acc/{id}/
+	if policy.Type == types.PolicyTypeOdMux {
+		if !strings.HasPrefix(strings.TrimLeft(req.Props.SavePath, "/"), "acc/") {
+			subID, err := selectOdMuxSubAccount(policy, req.Props.Size)
+			if err != nil {
+				return nil, err
+			}
+			inner := strings.TrimLeft(req.Props.SavePath, "/")
+			req.Props.SavePath = fmt.Sprintf("acc/%d/%s", subID, inner)
+		}
+	}
+
 	// Create upload placeholder
 	var (
 		fileId     int
@@ -240,6 +253,32 @@ func (f *DBFS) PrepareUpload(ctx context.Context, req *fs.UploadRequest, opts ..
 
 	// TODO: frontend should create new upload session if resumed session does not exist.
 	return session, nil
+}
+
+// selectOdMuxSubAccount selects a subaccount with enough remaining capacity (with 1 MiB safety margin)
+// and the lowest remaining that fits.
+func selectOdMuxSubAccount(policy *ent.StoragePolicy, size int64) (int64, error) {
+	const safetyMargin int64 = 1 << 20 // 1 MiB
+	if policy == nil || policy.Settings == nil {
+		return -1, fmt.Errorf("onedrivemux: missing policy settings")
+	}
+	var chosenID int64 = -1
+	var chosenRemaining int64 = math.MaxInt64
+	for _, acc := range policy.Settings.OdMuxAccounts {
+		if acc.Disabled {
+			continue
+		}
+		if acc.Remaining >= size+safetyMargin {
+			if acc.Remaining < chosenRemaining {
+				chosenRemaining = acc.Remaining
+				chosenID = acc.ID
+			}
+		}
+	}
+	if chosenID < 0 {
+		return -1, serializer.NewError(serializer.CodeMetaMismatch, "onedrivemux: no subaccount has enough free space", nil)
+	}
+	return chosenID, nil
 }
 
 func (f *DBFS) CompleteUpload(ctx context.Context, session *fs.UploadSession) (fs.File, error) {

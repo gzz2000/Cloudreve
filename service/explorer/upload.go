@@ -177,7 +177,7 @@ func processChunkUpload(c *gin.Context, m manager.FileManager, session *fs.Uploa
 	ctx := context.WithValue(c, cluster.SlaveNodeIDCtx{}, strconv.Itoa(session.Policy.NodeID))
 	err = m.Upload(ctx, req, session.Policy)
 	if err != nil {
-		return err
+		return serializer.NewError(serializer.CodeIOFailed, "Failed to upload file", err)
 	}
 
 	if rc, ok := req.File.(request.LimitReaderCloser); ok {
@@ -191,7 +191,7 @@ func processChunkUpload(c *gin.Context, m manager.FileManager, session *fs.Uploa
 	if isLastChunk {
 		_, err := m.CompleteUpload(ctx, session)
 		if err != nil {
-			return fmt.Errorf("failed to complete upload: %w", err)
+			return serializer.NewError(serializer.CodeCallbackError, "Failed to complete upload", err)
 		}
 	}
 

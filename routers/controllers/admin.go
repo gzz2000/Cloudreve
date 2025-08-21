@@ -207,6 +207,24 @@ func AdminFinishOauthCallback(c *gin.Context) {
 	c.JSON(200, serializer.Response{})
 }
 
+func AdminOneDriveMuxToggleSubaccount(c *gin.Context) {
+	service := ParametersFromContext[*admin.OdMuxToggleSubaccountService](c, admin.OdMuxToggleSubaccountParamCtx{})
+	if err := service.Toggle(c); err != nil {
+		c.JSON(200, serializer.Err(c, err))
+		return
+	}
+	c.JSON(200, serializer.Response{})
+}
+
+func AdminOneDriveMuxSyncSubaccount(c *gin.Context) {
+	service := ParametersFromContext[*admin.OdMuxSyncSubaccountService](c, admin.OdMuxSyncSubaccountParamCtx{})
+	if err := service.Sync(c); err != nil {
+		c.JSON(200, serializer.Err(c, err))
+		return
+	}
+	c.JSON(200, serializer.Response{})
+}
+
 func AdminGetSharePointDriverRoot(c *gin.Context) {
 	service := ParametersFromContext[*admin.SingleStoragePolicyService](c, admin.GetStoragePolicyParamCtx{})
 	res, err := service.GetSharePointDriverRoot(c)

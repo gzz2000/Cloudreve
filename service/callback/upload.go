@@ -1,12 +1,12 @@
 package callback
 
 import (
-	"fmt"
 	"github.com/cloudreve/Cloudreve/v4/application/dependency"
 	"github.com/cloudreve/Cloudreve/v4/inventory"
 	"github.com/cloudreve/Cloudreve/v4/pkg/filemanager/driver/onedrive"
 	"github.com/cloudreve/Cloudreve/v4/pkg/filemanager/fs"
 	"github.com/cloudreve/Cloudreve/v4/pkg/filemanager/manager"
+	"github.com/cloudreve/Cloudreve/v4/pkg/serializer"
 	"github.com/gin-gonic/gin"
 )
 
@@ -53,7 +53,8 @@ func ProcessCallback(c *gin.Context) error {
 
 	_, err := m.CompleteUpload(c, uploadSession)
 	if err != nil {
-		return fmt.Errorf("failed to complete upload: %w", err)
+		// Wrap with a serializer AppError so client gets a clear code/message
+		return serializer.NewError(serializer.CodeCallbackError, "Upload callback failed", err)
 	}
 
 	return nil

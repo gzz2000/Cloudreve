@@ -101,6 +101,27 @@ type (
 		SourceAuth bool `json:"source_auth,omitempty"`
 		// QiniuUploadCdn whether to use CDN for Qiniu upload.
 		QiniuUploadCdn bool `json:"qiniu_upload_cdn,omitempty"`
+
+		// OneDrive Mux settings
+		OdMuxAccounts []OdMuxAccount `json:"od_mux_accounts,omitempty"`
+		OdMuxStrategy string         `json:"od_mux_strategy,omitempty"`
+		OdMuxNextID   int64          `json:"od_mux_next_id,omitempty"`
+	}
+
+	// OdMuxAccount defines a OneDrive subaccount managed under onedrivemux policy
+	OdMuxAccount struct {
+		ID            int64  `json:"id"`
+		AccountID     string `json:"account_id,omitempty"`
+		Email         string `json:"email,omitempty"`
+		RefreshToken  string `json:"refresh_token,omitempty"`
+		OdDriver      string `json:"od_driver,omitempty"`
+		Total         int64  `json:"total,omitempty"`
+		Used          int64  `json:"used,omitempty"`
+		Remaining     int64  `json:"remaining,omitempty"`
+		Disabled      bool   `json:"disabled,omitempty"`
+		CreatedAtUnix int64  `json:"created_at,omitempty"`
+		UpdatedAtUnix int64  `json:"updated_at,omitempty"`
+		LastSyncUnix  int64  `json:"last_quota_sync,omitempty"`
 	}
 
 	FileType         int
@@ -266,6 +287,7 @@ const (
 	PolicyTypeS3     = "s3"
 	PolicyTypeKs3    = "ks3"
 	PolicyTypeOd     = "onedrive"
+	PolicyTypeOdMux  = "onedrivemux"
 	PolicyTypeRemote = "remote"
 	PolicyTypeObs    = "obs"
 )

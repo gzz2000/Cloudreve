@@ -206,7 +206,10 @@ func uploadCallbackCheck(c *gin.Context, policyType types.PolicyType) error {
 	callbackSession := callbackSessionRaw.(fs.UploadSession)
 	c.Set(manager.UploadSessionCtx, &callbackSession)
 	if callbackSession.Policy.Type != string(policyType) {
-		return serializer.NewError(serializer.CodePolicyNotAllowed, "", nil)
+		// Allow OneDrive mux policy to use OneDrive callback endpoint
+		if !(policyType == types.PolicyTypeOd && callbackSession.Policy.Type == string(types.PolicyTypeOdMux)) {
+			return serializer.NewError(serializer.CodePolicyNotAllowed, "", nil)
+		}
 	}
 
 	if err := SetUserCtx(c, callbackSession.UID); err != nil {

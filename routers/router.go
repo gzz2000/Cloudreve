@@ -468,7 +468,8 @@ func initMasterRouter(dep dependency.Dep) *gin.Engine {
 				onedrive.POST(
 					":sessionID/:key",
 					middleware.UseUploadSession(types.PolicyTypeOd),
-					controllers.ProcessCallback(http.StatusOK, false),
+					// Return general response with error details for easier debugging
+					controllers.ProcessCallback(http.StatusBadRequest, true),
 				)
 			}
 			// Google Drive related
@@ -923,6 +924,18 @@ func initMasterRouter(dep dependency.Dep) *gin.Engine {
 						oauth.GET("root/:id",
 							controllers.FromUri[adminsvc.SingleStoragePolicyService](adminsvc.GetStoragePolicyParamCtx{}),
 							controllers.AdminGetSharePointDriverRoot,
+						)
+					}
+
+	onedrivemux := policy.Group("onedrivemux")
+					{
+						onedrivemux.POST("toggle",
+							controllers.FromJSON[adminsvc.OdMuxToggleSubaccountService](adminsvc.OdMuxToggleSubaccountParamCtx{}),
+							controllers.AdminOneDriveMuxToggleSubaccount,
+						)
+						onedrivemux.POST("sync",
+							controllers.FromJSON[adminsvc.OdMuxSyncSubaccountService](adminsvc.OdMuxSyncSubaccountParamCtx{}),
+							controllers.AdminOneDriveMuxSyncSubaccount,
 						)
 					}
 

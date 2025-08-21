@@ -241,8 +241,37 @@ func obtainToken(ctx context.Context, args *obtainTokenArgs) (*Credential, error
 
 // UpdateCredential 更新凭证，并检查有效期
 func (client *client) UpdateCredential(ctx context.Context) error {
-	newCred, err := client.cred.Obtain(ctx, CredentialKey(client.policy.ID))
+	key := client.credentialKey
+	if key == "" {
+		key = CredentialKey(client.policy.ID)
+	}
+	newCred, err := client.cred.Obtain(ctx, key)
 	if err != nil {
+		// Seed mux credential from policy settings if missing after restart
+		if strings.HasPrefix(key, "cred_odmux_") {
+			if policy := client.policy; policy != nil && policy.Settings != nil {
+				// Parse subID from key suffix
+				parts := strings.Split(key, "_")
+				if len(parts) >= 4 { // [cred][odmux]{policyID}{subID}
+					subStr := parts[len(parts)-1]
+					if subID, parseErr := strconv.ParseInt(subStr, 10, 64); parseErr == nil {
+						for i := range policy.Settings.OdMuxAccounts {
+							acc := &policy.Settings.OdMuxAccounts[i]
+							if acc.ID == subID && !acc.Disabled && acc.RefreshToken != "" {
+								seed := OdMuxCredential{PolicyID: policy.ID, SubID: subID, RefreshToken: acc.RefreshToken, ExpiresIn: 0}
+								// Best-effort upsert and retry obtain
+								_ = client.cred.Upsert(ctx, seed)
+								if retry, obErr := client.cred.Obtain(ctx, key); obErr == nil {
+									client.credential = retry
+									return nil
+								}
+								break
+							}
+						}
+					}
+				}
+			}
+		}
 		return fmt.Errorf("failed to obtain token from CredManager: %w", err)
 	}
 
@@ -268,4 +297,85 @@ func RetrieveOneDriveCredentials(ctx context.Context, storagePolicyClient invent
 
 func CredentialKey(policyId int) string {
 	return fmt.Sprintf("cred_od_%d", policyId)
+}
+
+// OdMuxCredential stores OneDrive tokens for a subaccount under a OneDrive Mux policy.
+type OdMuxCredential struct {
+	ExpiresIn       int64  `json:"expires_in"`
+	AccessToken     string `json:"access_token"`
+	RefreshToken    string `json:"refresh_token"`
+	RefreshedAtUnix int64  `json:"refreshed_at"`
+
+	PolicyID int   `json:"policy_id"`
+	SubID    int64 `json:"sub_id"`
+}
+
+func init() {
+	gob.Register(OdMuxCredential{})
+}
+
+func (c OdMuxCredential) Key() string { return OdMuxCredentialKey(c.PolicyID, c.SubID) }
+
+func (c OdMuxCredential) Expiry() time.Time { return time.Unix(c.ExpiresIn-AccessTokenExpiryMargin, 0) }
+
+func (c OdMuxCredential) String() string { return c.AccessToken }
+
+func (c OdMuxCredential) RefreshedAt() *time.Time {
+	if c.RefreshedAtUnix == 0 {
+		return nil
+	}
+	t := time.Unix(c.RefreshedAtUnix, 0)
+	return &t
+}
+
+func (c OdMuxCredential) Refresh(ctx context.Context) (credmanager.Credential, error) {
+	if c.RefreshToken == "" {
+		return nil, ErrInvalidRefreshToken
+	}
+	dep := dependency.FromContext(ctx)
+	storagePolicyClient := dep.StoragePolicyClient()
+	policy, err := storagePolicyClient.GetPolicyByID(ctx, c.PolicyID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get mux policy: %w", err)
+	}
+	oauthBase := getOAuthEndpoint(policy.Server)
+	newCredential, err := obtainToken(ctx, &obtainTokenArgs{
+		clientId:      policy.BucketName,
+		redirect:      policy.Settings.OauthRedirect,
+		secret:        policy.SecretKey,
+		refreshToken:  c.RefreshToken,
+		client:        dep.RequestClient(request.WithLogger(dep.Logger())),
+		tokenEndpoint: oauthBase.token.String(),
+		policyID:      c.PolicyID,
+	})
+	if err != nil {
+		return nil, err
+	}
+	// Write new refresh token back into mux policy settings for this sub account
+	if policy.Settings == nil {
+		policy.Settings = &types.PolicySetting{}
+	}
+	found := false
+	for i := range policy.Settings.OdMuxAccounts {
+		if policy.Settings.OdMuxAccounts[i].ID == c.SubID {
+			policy.Settings.OdMuxAccounts[i].RefreshToken = newCredential.RefreshToken
+			found = true
+			break
+		}
+	}
+	if !found {
+		return nil, fmt.Errorf("failed to update refresh token: subaccount %d not found", c.SubID)
+	}
+	if _, err := storagePolicyClient.Upsert(ctx, policy); err != nil {
+		return nil, err
+	}
+	c.RefreshToken = newCredential.RefreshToken
+	c.AccessToken = newCredential.AccessToken
+	c.ExpiresIn = newCredential.ExpiresIn
+	c.RefreshedAtUnix = time.Now().Unix()
+	return c, nil
+}
+
+func OdMuxCredentialKey(policyId int, subId int64) string {
+	return fmt.Sprintf("cred_odmux_%d_%d", policyId, subId)
 }

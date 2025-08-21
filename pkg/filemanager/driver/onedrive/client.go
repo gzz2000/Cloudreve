@@ -1,6 +1,7 @@
 package onedrive
 
 import (
+	"encoding/json"
 	"context"
 	"errors"
 	"io"
@@ -40,6 +41,7 @@ type Client interface {
 	GetThumbURL(ctx context.Context, dst string) (string, error)
 	OAuthURL(ctx context.Context, scopes []string) string
 	ObtainToken(ctx context.Context, opts ...Option) (*Credential, error)
+	GetDriveQuota(ctx context.Context) (*DriveQuota, error)
 }
 
 // client OneDrive客户端
@@ -54,6 +56,8 @@ type client struct {
 	settings   setting.Provider
 
 	chunkSize int64
+	// override credential key used with CredManager
+	credentialKey string
 }
 
 // endpoints OneDrive客户端相关设置
@@ -66,6 +70,12 @@ type endpoints struct {
 // NewClient 根据存储策略获取新的client
 func NewClient(policy *ent.StoragePolicy, httpClient request.Client, cred credmanager.CredManager,
 	l logging.Logger, settings setting.Provider, chunkSize int64) Client {
+	return NewClientWithCredentialKey(policy, httpClient, cred, l, settings, chunkSize, "")
+}
+
+// NewClientWithCredentialKey creates a client with a custom credential key.
+func NewClientWithCredentialKey(policy *ent.StoragePolicy, httpClient request.Client, cred credmanager.CredManager,
+	l logging.Logger, settings setting.Provider, chunkSize int64, credentialKey string) Client {
 	client := &client{
 		endpoints: &endpoints{
 			endpointURL:    policy.Server,
@@ -77,6 +87,7 @@ func NewClient(policy *ent.StoragePolicy, httpClient request.Client, cred credma
 		l:          l,
 		settings:   settings,
 		chunkSize:  chunkSize,
+		credentialKey: credentialKey,
 	}
 
 	if client.endpoints.driverResource == "" {
@@ -87,4 +98,39 @@ func NewClient(policy *ent.StoragePolicy, httpClient request.Client, cred credma
 	client.endpoints.oAuthEndpoints = oauthBase
 
 	return client
+}
+
+// DriveQuota summarizes OneDrive quota numbers.
+type DriveQuota struct {
+	Total     int64 `json:"total"`
+	Used      int64 `json:"used"`
+	Remaining int64 `json:"remaining"`
+}
+
+// GetDriveQuota returns current drive quota info for the configured driver resource.
+func (client *client) GetDriveQuota(ctx context.Context) (*DriveQuota, error) {
+	// Ensure credential is valid
+	if err := client.UpdateCredential(ctx); err != nil {
+		return nil, err
+	}
+
+	// Build URL to "me/drive" (driverResource) without appending extra segments
+	requestURL := client.getRequestURL("", WithDriverResource(true))
+	res, err := client.requestWithStr(ctx, "GET", requestURL, "", 200)
+	if err != nil {
+		return nil, err
+	}
+
+	// Minimal struct for decoding quota
+	var payload struct {
+		Quota struct {
+			Total     int64 `json:"total"`
+			Used      int64 `json:"used"`
+			Remaining int64 `json:"remaining"`
+		} `json:"quota"`
+	}
+	if decodeErr := json.Unmarshal([]byte(res), &payload); decodeErr != nil {
+		return nil, decodeErr
+	}
+	return &DriveQuota{Total: payload.Quota.Total, Used: payload.Quota.Used, Remaining: payload.Quota.Remaining}, nil
 }

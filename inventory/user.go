@@ -62,6 +62,9 @@ type (
 		GetLoginUserByID(ctx context.Context, uid int) (*ent.User, error)
 		// GetLoginUserByEmail returns the login user by its WebDAV credentials.
 		GetActiveByDavAccount(ctx context.Context, email, pwd string) (*ent.User, error)
+		// GetActiveByDavS3Access returns the active user by email and (optionally) filters DAV accounts by bucket name.
+		// It eager-loads Group and DAV accounts for S3 auth.
+		GetActiveByDavS3Access(ctx context.Context, email string, bucket *string) (*ent.User, []*ent.DavAccount, error)
 		// SaveSettings saves user settings.
 		SaveSettings(ctx context.Context, u *ent.User) error
 		// SearchActive search active users by Email or nickname.
@@ -369,6 +372,26 @@ func (c *userClient) GetActiveByDavAccount(ctx context.Context, email, pwd strin
 				q.Where(davaccount.Password(pwd))
 			}),
 	).First(ctx)
+}
+
+// GetActiveByDavS3Access loads an active user by email and eager-loads DAV accounts (optionally filtered by bucket name),
+// as well as the Group edge required by downstream permission checks.
+func (c *userClient) GetActiveByDavS3Access(ctx context.Context, email string, bucket *string) (*ent.User, []*ent.DavAccount, error) {
+	ctx = context.WithValue(ctx, LoadUserGroup{}, true)
+	q := c.client.User.Query().
+		Where(user.EmailEqualFold(email)).
+		Where(user.StatusEQ(user.StatusActive)).
+		WithDavAccounts(func(dq *ent.DavAccountQuery) {
+			if bucket != nil && *bucket != "" {
+				dq.Where(davaccount.NameEQ(*bucket))
+			}
+		})
+	u, err := withUserEagerLoading(ctx, q).First(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	accs, _ := u.Edges.DavAccountsOrErr()
+	return u, accs, nil
 }
 
 func (c *userClient) GetLoginUserByID(ctx context.Context, uid int) (*ent.User, error) {

@@ -43,6 +43,7 @@ func FrontendFileHandler(dep dependency.Dep) gin.HandlerFunc {
 		// Skipping routers handled by backend
 		if strings.HasPrefix(path, "/api") ||
 			strings.HasPrefix(path, "/dav") ||
+			strings.HasPrefix(path, "/s3") ||
 			strings.HasPrefix(path, "/f/") ||
 			strings.HasPrefix(path, "/s/") ||
 			path == "/manifest.json" {

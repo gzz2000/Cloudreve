@@ -15,6 +15,7 @@ import (
 	"github.com/cloudreve/Cloudreve/v4/pkg/hashid"
 	"github.com/cloudreve/Cloudreve/v4/pkg/logging"
 	"github.com/cloudreve/Cloudreve/v4/pkg/webdav"
+	"github.com/cloudreve/Cloudreve/v4/pkg/s3server"
 	"github.com/cloudreve/Cloudreve/v4/routers/controllers"
 	adminsvc "github.com/cloudreve/Cloudreve/v4/service/admin"
 	"github.com/cloudreve/Cloudreve/v4/service/basic"
@@ -1182,6 +1183,8 @@ func initMasterRouter(dep dependency.Dep) *gin.Engine {
 
 	// 初始化WebDAV相关路由
 	initWebDAV(r.Group("dav"))
+	// 初始化S3相关路由
+	initS3(r.Group("s3"))
 	return r
 }
 
@@ -1200,5 +1203,24 @@ func initWebDAV(group *gin.RouterGroup) {
 		group.Handle("COPY", "/*path", webdav.ServeHTTP)
 		group.Handle("MOVE", "/*path", webdav.ServeHTTP)
 
+	}
+}
+
+// initS3 initializes S3-compatible routes
+func initS3(group *gin.RouterGroup) {
+	{
+		group.Use(middleware.CacheControl(), middleware.S3Auth())
+		// Service endpoints (support both /s3 and /s3/ to avoid redirects)
+		group.GET("/", s3server.ListBuckets)
+		group.GET("", s3server.ListBuckets)
+		// Bucket scoped
+		group.HEAD(":bucket", s3server.HeadBucket)
+		group.GET(":bucket", s3server.ListObjectsV2)
+		// Object scoped
+		group.GET(":bucket/*key", s3server.GetObject)
+		group.HEAD(":bucket/*key", s3server.HeadObject)
+		group.PUT(":bucket/*key", s3server.PutObject)
+		group.POST(":bucket/*key", s3server.PostObject)
+		group.DELETE(":bucket/*key", s3server.DeleteObject)
 	}
 }

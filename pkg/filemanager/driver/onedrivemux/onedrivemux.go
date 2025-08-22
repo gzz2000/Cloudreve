@@ -49,7 +49,21 @@ func New(_ context.Context, policy *ent.StoragePolicy, settings setting.Provider
 	}, nil
 }
 
-func (d *Driver) Put(ctx context.Context, file *fs.UploadRequest) error { return fmt.Errorf("onedrivemux.Put not implemented") }
+func (d *Driver) Put(ctx context.Context, file *fs.UploadRequest) error {
+  subID, inner := parseMuxPath(file.Props.SavePath)
+  if subID < 0 || inner == "" {
+    return fmt.Errorf("onedrivemux: invalid SavePath, missing acc/{id} prefix")
+  }
+  _, c, err := d.resolveSubClient(ctx, subID)
+  if err != nil {
+    return err
+  }
+  // Temporarily switch SavePath to inner path for OneDrive client
+  orig := file.Props.SavePath
+  file.Props.SavePath = inner
+  defer func() { file.Props.SavePath = orig }()
+  return c.Upload(ctx, file)
+}
 
 func (d *Driver) Delete(ctx context.Context, files ...string) ([]string, error) {
   // Group by subaccount

@@ -33,3 +33,15 @@
 - Config file: pass with `-c` (defaults to `conf.ini`).
 - Env overrides: `CR_CONF_{Section}.{Key}=Value` (e.g., `CR_CONF_System.Debug=true`).
 - Do not commit secrets; prefer environment variables or external config volumes.
+
+## Agent Build & Escalation Notes
+-	Frontend compile: run `./.build/build-assets.sh 4.5.1` — this calls `yarn build` and zips the result into `application/statics/assets.zip`.
+-	Backend compile: use the following command (ldflags are required and this also packs the last-compiled frontend assets zip into the binary):
+
+```
+go build -a -o cloudreve \
+	-ldflags "-s -w -X 'github.com/cloudreve/Cloudreve/v4/application/constants.BackendVersion=$(git describe --tags)' -X 'github.com/cloudreve/Cloudreve/v4/application/constants.LastCommit=$(git rev-parse --short HEAD)'"
+```
+
+-	Escalation: both commands require escalation; you can safely ask the user for approval to run them. When code changes are made, use the appropriate command to verify the code compiles. You can set command execution timeout to 10 minutes or more.
+-	Indentation: remember to use TAB instead of spaces. TAB is the convention of this repo.

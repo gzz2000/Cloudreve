@@ -9,6 +9,7 @@ import (
 var contentLengthHeaders = []string{
 	"Content-Length",
 	"X-Expected-Entity-Length", // DavFS on MacOS
+	"X-Amz-Decoded-Content-Length", // AWS SigV4 streaming
 }
 
 // BlackHole 将客户端发来的数据放入黑洞
@@ -51,6 +52,14 @@ func newLimitReaderCloser(r io.ReadCloser, limit int64) LimitReaderCloser {
 	}
 }
 
+// newLimitlessReaderCloser wraps an io.ReadCloser without a read limit and tracks bytes read via Count().
+func newLimitlessReaderCloser(r io.ReadCloser) LimitReaderCloser {
+	return &limitReaderCloser{
+		Reader: r,
+		Closer: r,
+	}
+}
+
 func (l *limitReaderCloser) Read(p []byte) (n int, err error) {
 	n, err = l.Reader.Read(p)
 	l.read += int64(n)
@@ -59,4 +68,10 @@ func (l *limitReaderCloser) Read(p []byte) (n int, err error) {
 
 func (l *limitReaderCloser) Count() int64 {
 	return l.read
+}
+
+// NewLimitlessReaderCloser wraps an io.ReadCloser without a read limit and tracks bytes
+// read via Count().
+func NewLimitlessReaderCloser(r io.ReadCloser) LimitReaderCloser {
+	return newLimitlessReaderCloser(r)
 }

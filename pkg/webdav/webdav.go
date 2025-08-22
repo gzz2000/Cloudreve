@@ -333,6 +333,9 @@ func handleGetHeadPost(c *gin.Context, user *ent.User, fm manager.FileManager) (
 		return http.StatusMethodNotAllowed, nil
 	}
 
+	// Set Last-Modified header for WebDAV GET/HEAD
+	c.Writer.Header().Set("Last-Modified", target.UpdatedAt().UTC().Format(http.TimeFormat))
+
 	es, err := fm.GetEntitySource(c, target.PrimaryEntityID())
 	if err != nil {
 		return purposeStatusCodeFromError(err), err

@@ -19,8 +19,8 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// ListBuckets returns DAV accounts as S3 buckets for the authenticated user.
-func ListBuckets(c *gin.Context) {
+// handleListBuckets returns DAV accounts as S3 buckets for the authenticated user.
+func handleListBuckets(c *gin.Context) {
 	dep := dependency.FromContext(c)
 	l := dep.Logger()
 	user := inventory.UserFromContext(c)
@@ -51,8 +51,8 @@ func ListBuckets(c *gin.Context) {
 	_ = xml.NewEncoder(c.Writer).Encode(result)
 }
 
-// HeadBucket returns 200 if bucket exists for current user.
-func HeadBucket(c *gin.Context) {
+// handleHeadBucket returns 200 if bucket exists for current user.
+func handleHeadBucket(c *gin.Context) {
 	_, _, _, err := getAccountContext(c)
 	if err != nil {
 		c.Status(http.StatusNotFound)
@@ -61,8 +61,8 @@ func HeadBucket(c *gin.Context) {
 	c.Status(http.StatusOK)
 }
 
-// ListObjectsV2 lists objects/prefixes under a bucket.
-func ListObjectsV2(c *gin.Context) {
+// handleListObjectsV2 lists objects/prefixes under a bucket.
+func handleListObjectsV2(c *gin.Context) {
 	acc, base, fm, err := getAccountContext(c)
 	if err != nil {
 		c.Status(http.StatusNotFound)
@@ -138,8 +138,8 @@ func ListObjectsV2(c *gin.Context) {
 	_ = xml.NewEncoder(c.Writer).Encode(res)
 }
 
-// GetObject streams object content.
-func GetObject(c *gin.Context) {
+// handleGetObject streams object content.
+func handleGetObject(c *gin.Context) {
 	_, base, fm, err := getAccountContext(c)
 	if err != nil {
 		c.Status(http.StatusNotFound)
@@ -185,8 +185,8 @@ func GetObject(c *gin.Context) {
 	es.Serve(c.Writer, c.Request)
 }
 
-// HeadObject returns headers of object.
-func HeadObject(c *gin.Context) {
+// handleHeadObject returns headers of object.
+func handleHeadObject(c *gin.Context) {
 	_, base, fm, err := getAccountContext(c)
 	if err != nil {
 		c.Status(http.StatusNotFound)
@@ -230,8 +230,8 @@ func HeadObject(c *gin.Context) {
 	es.Serve(c.Writer, c.Request)
 }
 
-// PutObject uploads or overwrites a single object.
-func PutObject(c *gin.Context) {
+// handlePutObject uploads or overwrites a single object.
+func handlePutObject(c *gin.Context) {
 	// Reject multipart/advanced via POST emulation headers
 	if c.GetHeader("x-amz-copy-source") != "" || c.GetHeader("x-amz-meta-uuid") != "" {
 		c.Status(http.StatusNotImplemented)
@@ -303,8 +303,8 @@ func PutObject(c *gin.Context) {
 	c.Status(http.StatusOK)
 }
 
-// DeleteObject deletes an object.
-func DeleteObject(c *gin.Context) {
+// handleDeleteObject deletes an object.
+func handleDeleteObject(c *gin.Context) {
 	_, base, fm, err := getAccountContext(c)
 	if err != nil {
 		c.Status(http.StatusNotFound)
@@ -327,8 +327,8 @@ func DeleteObject(c *gin.Context) {
 	c.Status(http.StatusNoContent)
 }
 
-// PostObject handles unsupported operations like multipart upload.
-func PostObject(c *gin.Context) {
+// handlePostObject handles unsupported operations like multipart upload.
+func handlePostObject(c *gin.Context) {
 	// Minimal S3 server does not support POST-based multipart or form uploads yet.
 	c.Status(http.StatusNotImplemented)
 }

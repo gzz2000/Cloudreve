@@ -15,30 +15,30 @@ func ServeHTTP(c *gin.Context) {
 	switch c.Request.Method {
 	case http.MethodGet:
 		if bucket == "" {
-			ListBuckets(c)
+			handleListBuckets(c)
 			return
 		}
 		if key == "" || key == "/" {
-			ListObjectsV2(c)
+			handleListObjectsV2(c)
 			return
 		}
-		GetObject(c)
+		handleGetObject(c)
 		return
 
 	case http.MethodHead:
 		if key == "" || key == "/" {
-			HeadBucket(c)
+			handleHeadBucket(c)
 			return
 		}
-		HeadObject(c)
+		handleHeadObject(c)
 		return
 
 	case http.MethodPut:
-		PutObject(c)
+		handlePutObject(c)
 		return
 
 	case http.MethodDelete:
-		DeleteObject(c)
+		handleDeleteObject(c)
 		return
 
 	case http.MethodPost:
@@ -50,4 +50,3 @@ func ServeHTTP(c *gin.Context) {
 	// Method not supported
 	c.Status(http.StatusMethodNotAllowed)
 }
-

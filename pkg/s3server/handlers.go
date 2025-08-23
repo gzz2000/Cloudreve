@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/cloudreve/Cloudreve/v4/application/dependency"
 	"github.com/cloudreve/Cloudreve/v4/ent"
@@ -248,6 +249,14 @@ func handlePutObject(c *gin.Context) {
 	key := strings.TrimPrefix(c.Param("key"), "/")
 	uri := base.JoinRaw(key)
 
+	// Optional: parse mtime from x-amz-meta-mtime
+	var lastModifiedPtr *time.Time
+	if v := c.GetHeader("x-amz-meta-mtime"); v != "" {
+		if t, ok := parseMetaMTime(v); ok {
+			lastModifiedPtr = t
+		}
+	}
+
 	// Prepare request body and length
 	var rc request.LimitReaderCloser
 	var fileSize int64
@@ -277,8 +286,9 @@ func handlePutObject(c *gin.Context) {
 
 	fileData := &fs.UploadRequest{
 		Props: &fs.UploadProps{
-			Uri:  uri,
-			Size: fileSize,
+			Uri:          uri,
+			Size:         fileSize,
+			LastModified: lastModifiedPtr,
 		},
 		File: rc,
 		Mode: fs.ModeOverwrite,

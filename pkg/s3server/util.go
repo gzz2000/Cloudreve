@@ -5,8 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
+	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
+	"time"
 )
 
 var (
@@ -138,4 +142,46 @@ func isAWSStreamingPayload(headers map[string]string, get func(string) string) b
 		return true
 	}
 	return false
+}
+
+// parseMetaMTime parses a timestamp value from x-amz-meta-mtime.
+// Supported formats:
+// - Unix seconds (e.g., "1693412345")
+// - Unix seconds with fractional part (e.g., "1693412345.123")
+// - RFC3339 (e.g., "2023-08-31T12:34:56Z")
+// - HTTP time (e.g., time.RFC1123)
+// Returns (t, true) if parsed, otherwise (nil, false).
+func parseMetaMTime(s string) (*time.Time, bool) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, false
+	}
+	// Try integer Unix seconds first
+	if i, err := strconv.ParseInt(s, 10, 64); err == nil {
+		if i < 0 {
+			return nil, false
+		}
+		t := time.Unix(i, 0).UTC()
+		return &t, true
+	}
+	// Try float Unix seconds
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		if f < 0 {
+			return nil, false
+		}
+		sec, frac := math.Modf(f)
+		t := time.Unix(int64(sec), int64(frac*1e9)).UTC()
+		return &t, true
+	}
+	// Try RFC3339
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		t = t.UTC()
+		return &t, true
+	}
+	// Try HTTP time formats
+	if t, err := http.ParseTime(s); err == nil {
+		t = t.UTC()
+		return &t, true
+	}
+	return nil, false
 }

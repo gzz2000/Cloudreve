@@ -63,4 +63,32 @@ type (
 	Prefix struct {
 		Prefix string `xml:"Prefix"`
 	}
+
+	// Multipart XML types
+	InitiateMultipartUploadResult struct {
+		XMLName xml.Name `xml:"InitiateMultipartUploadResult"`
+		Xmlns   string   `xml:"xmlns,attr,omitempty"`
+		Bucket  string   `xml:"Bucket"`
+		Key     string   `xml:"Key"`
+		UploadID string  `xml:"UploadId"`
+	}
+
+	CompleteMultipartUpload struct {
+		XMLName xml.Name          `xml:"CompleteMultipartUpload"`
+		Parts   []CompletedPart    `xml:"Part"`
+	}
+
+	CompletedPart struct {
+		PartNumber int    `xml:"PartNumber"`
+		ETag       string `xml:"ETag"`
+	}
+
+	CompleteMultipartUploadResult struct {
+		XMLName xml.Name `xml:"CompleteMultipartUploadResult"`
+		Xmlns   string   `xml:"xmlns,attr,omitempty"`
+		Location string  `xml:"Location,omitempty"`
+		Bucket   string  `xml:"Bucket"`
+		Key      string  `xml:"Key"`
+		ETag     string  `xml:"ETag"`
+	}
 )

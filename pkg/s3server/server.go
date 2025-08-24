@@ -19,6 +19,11 @@ func ServeHTTP(c *gin.Context) {
 			return
 		}
 		if key == "" || key == "/" {
+			// List or ListParts (multipart)
+			if _, ok := c.GetQuery("uploadId"); ok {
+				handleListParts(c)
+				return
+			}
 			handleListObjectsV2(c)
 			return
 		}
@@ -34,15 +39,40 @@ func ServeHTTP(c *gin.Context) {
 		return
 
 	case http.MethodPut:
+		// Initiate multipart if ?uploads is present (some clients use PUT)
+		if _, ok := c.GetQuery("uploads"); ok {
+			handleInitiateMultipart(c)
+			return
+		}
+		// UploadPart if uploadId & partNumber present
+		if _, ok := c.GetQuery("uploadId"); ok {
+			if _, ok2 := c.GetQuery("partNumber"); ok2 {
+				handleUploadPart(c)
+				return
+			}
+		}
 		handlePutObject(c)
 		return
 
 	case http.MethodDelete:
+		// AbortMultipartUpload
+		if _, ok := c.GetQuery("uploadId"); ok {
+			handleAbortMultipart(c)
+			return
+		}
 		handleDeleteObject(c)
 		return
 
 	case http.MethodPost:
-		// Multipart and advanced ops are not supported in minimal S3 server.
+		// Initiate multipart (?uploads) or Complete (with uploadId)
+		if _, ok := c.GetQuery("uploads"); ok {
+			handleInitiateMultipart(c)
+			return
+		}
+		if _, ok := c.GetQuery("uploadId"); ok {
+			handleCompleteMultipart(c)
+			return
+		}
 		c.Status(http.StatusNotImplemented)
 		return
 	}

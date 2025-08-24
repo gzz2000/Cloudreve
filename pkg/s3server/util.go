@@ -185,3 +185,6 @@ func parseMetaMTime(s string) (*time.Time, bool) {
 	}
 	return nil, false
 }
+
+// mpuKey returns cache key for multipart session
+func mpuKey(id string) string { return "s3mpu_" + id }

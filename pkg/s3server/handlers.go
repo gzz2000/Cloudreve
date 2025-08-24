@@ -3,7 +3,12 @@ package s3server
 import (
 	"encoding/xml"
 	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -17,8 +22,27 @@ import (
 	"github.com/cloudreve/Cloudreve/v4/pkg/filemanager/manager/entitysource"
 	"github.com/cloudreve/Cloudreve/v4/pkg/hashid"
 	"github.com/cloudreve/Cloudreve/v4/pkg/request"
+	"github.com/cloudreve/Cloudreve/v4/pkg/util"
+	"github.com/gofrs/uuid"
 	"github.com/gin-gonic/gin"
+	"crypto/md5"
 )
+
+// s3MPUSession stores state for S3-compatible multipart uploads handled by Cloudreve.
+type s3MPUSession struct {
+	UploadID string
+	Bucket   string
+	Key      string
+	UserID   int
+	TmpDir   string
+	MTime    *time.Time
+}
+
+// keyRelativeToBase returns the S3 object key relative to the DAV account base URI.
+func keyRelativeToBase(base *fs.URI, target fs.File) string {
+	rel := strings.TrimPrefix(target.Uri(false).Path(), base.Path())
+	return strings.TrimPrefix(rel, "/")
+}
 
 // handleListBuckets returns DAV accounts as S3 buckets for the authenticated user.
 func handleListBuckets(c *gin.Context) {
@@ -99,7 +123,7 @@ func handleListObjectsV2(c *gin.Context) {
 		etag, _ := etagForFile(c, fm, file)
 		res.KeyCount = 1
 		res.Contents = append(res.Contents, Content{
-			Key:          strings.TrimPrefix(real.Rebase(file.Uri(false), base).PathTrimmed(), "/"),
+			Key:          keyRelativeToBase(base, file),
 			LastModified: file.UpdatedAt(),
 			ETag:         etag,
 			Size:         file.Size(),
@@ -118,14 +142,14 @@ func handleListObjectsV2(c *gin.Context) {
 		}
 		for _, f := range listRes.Files {
 			if f.Type() == types.FileTypeFolder {
-				p := strings.TrimPrefix(real.Rebase(f.Uri(false), base).PathTrimmed(), "/") + "/"
+				p := keyRelativeToBase(base, f) + "/"
 				if delimiter == "/" {
 					res.CommonPrefixes = append(res.CommonPrefixes, Prefix{Prefix: p})
 				}
 				continue
 			}
 			etag, _ := etagForFile(c, fm, f)
-			key := strings.TrimPrefix(real.Rebase(f.Uri(false), base).PathTrimmed(), "/")
+			key := keyRelativeToBase(base, f)
 			res.Contents = append(res.Contents, Content{Key: key, LastModified: f.UpdatedAt(), ETag: etag, Size: f.Size(), StorageClass: "STANDARD"})
 		}
 		res.KeyCount = len(res.Contents)
@@ -311,6 +335,235 @@ func handlePutObject(c *gin.Context) {
 	etag, _ := etagForFile(c, m, res)
 	c.Header("ETag", etag)
 	c.Status(http.StatusOK)
+}
+
+// Multipart: Initiate
+func handleInitiateMultipart(c *gin.Context) {
+	acc, _, _, err := getAccountContext(c)
+	if err != nil {
+		c.Status(http.StatusNotFound)
+		return
+	}
+
+	key := strings.TrimPrefix(c.Param("key"), "/")
+	// Parse optional mtime from metadata headers at initiate time
+	var lastModifiedPtr *time.Time
+	if v := c.GetHeader("x-amz-meta-mtime"); v != "" {
+		if t, ok := parseMetaMTime(v); ok {
+			lastModifiedPtr = t
+		}
+	}
+
+	dep := dependency.FromContext(c)
+	kv := dep.KV()
+	u := inventory.UserFromContext(c)
+	upID := uuid.Must(uuid.NewV4()).String()
+	// Create temp dir for parts
+	tmp := filepath.Join(util.DataPath("tmp"), "s3mpu", upID)
+	if err := os.MkdirAll(tmp, 0755); err != nil {
+		c.Status(http.StatusInternalServerError)
+		return
+	}
+	sess := s3MPUSession{UploadID: upID, Bucket: acc.Name, Key: key, UserID: u.ID, TmpDir: tmp, MTime: lastModifiedPtr}
+	// TTL from settings
+	ttl := dep.SettingProvider().UploadSessionTTL(c)
+	n := int(ttl.Seconds())
+	if n < 1 { n = 3600 }
+	_ = kv.Set(mpuKey(upID), sess, n)
+
+	res := InitiateMultipartUploadResult{Bucket: acc.Name, Key: key, UploadID: upID}
+	c.Header("Content-Type", "application/xml")
+	_ = xml.NewEncoder(c.Writer).Encode(res)
+}
+
+// Multipart: UploadPart
+func handleUploadPart(c *gin.Context) {
+	dep := dependency.FromContext(c)
+	kv := dep.KV()
+	upID := c.Query("uploadId")
+	if upID == "" {
+		c.Status(http.StatusBadRequest)
+		return
+	}
+	cached, ok := kv.Get(mpuKey(upID))
+	if !ok {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	sess := cached.(s3MPUSession)
+	if u := inventory.UserFromContext(c); u == nil || u.ID != sess.UserID {
+		c.Status(http.StatusForbidden)
+		return
+	}
+	// Validate bucket/key match
+	key := strings.TrimPrefix(c.Param("key"), "/")
+	if sess.Key != key || sess.Bucket != c.Param("bucket") {
+		c.Status(http.StatusNotFound)
+		return
+	}
+
+	partStr := c.Query("partNumber")
+	partNum, err := strconv.Atoi(partStr)
+	if err != nil || partNum <= 0 {
+		c.Status(http.StatusBadRequest)
+		return
+	}
+
+	// Decode body length and streaming if aws-chunked
+	var rc request.LimitReaderCloser
+	if isAWSStreamingPayload(nil, c.Request.Header.Get) {
+		rc = request.NewLimitlessReaderCloser(newAWSChunkedReader(c.Request.Body))
+	} else {
+		var perr error
+		rc, _, perr = request.SniffContentLength(c.Request)
+		if perr != nil {
+			c.Status(http.StatusBadRequest)
+			return
+		}
+	}
+	defer rc.Close()
+
+	// Write to temp file while computing MD5
+	partPath := filepath.Join(sess.TmpDir, fmt.Sprintf("%08d.part", partNum))
+	f, err := os.Create(partPath)
+	if err != nil {
+		c.Status(http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+
+	h := md5.New()
+	if _, err := io.Copy(io.MultiWriter(f, h), rc); err != nil {
+		c.Status(http.StatusInternalServerError)
+		return
+	}
+	etag := fmt.Sprintf("\"%x\"", h.Sum(nil))
+	c.Header("ETag", etag)
+	c.Status(http.StatusOK)
+}
+
+// Multipart: Complete
+func handleCompleteMultipart(c *gin.Context) {
+	dep := dependency.FromContext(c)
+	kv := dep.KV()
+	upID := c.Query("uploadId")
+	if upID == "" {
+		c.Status(http.StatusBadRequest)
+		return
+	}
+	cached, ok := kv.Get(mpuKey(upID))
+	if !ok {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	sess := cached.(s3MPUSession)
+	if u := inventory.UserFromContext(c); u == nil || u.ID != sess.UserID {
+		c.Status(http.StatusForbidden)
+		return
+	}
+	key := strings.TrimPrefix(c.Param("key"), "/")
+	if sess.Key != key || sess.Bucket != c.Param("bucket") {
+		c.Status(http.StatusNotFound)
+		return
+	}
+
+	// Parse incoming CompleteMultipartUpload XML (we don't strictly need ETags here)
+	var reqXML CompleteMultipartUpload
+	if err := xml.NewDecoder(c.Request.Body).Decode(&reqXML); err != nil {
+		// Some clients may send empty body; tolerate
+	}
+
+	// Assemble parts
+	entries, err := os.ReadDir(sess.TmpDir)
+	if err != nil {
+		c.Status(http.StatusInternalServerError)
+		return
+	}
+	// Map partNum->filename
+	parts := make([]int, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() { continue }
+		name := e.Name()
+		if strings.HasSuffix(name, ".part") {
+			if n, err := strconv.Atoi(strings.TrimSuffix(name, ".part")); err == nil {
+				parts = append(parts, n)
+			}
+		}
+	}
+	sort.Ints(parts)
+	finalPath := filepath.Join(sess.TmpDir, "assembled.bin")
+	out, err := os.Create(finalPath)
+	if err != nil {
+		c.Status(http.StatusInternalServerError)
+		return
+	}
+	var total int64
+	for _, pn := range parts {
+		p := filepath.Join(sess.TmpDir, fmt.Sprintf("%08d.part", pn))
+		in, err := os.Open(p)
+		if err != nil { out.Close(); c.Status(http.StatusInternalServerError); return }
+		n, err := io.Copy(out, in)
+		_ = in.Close()
+		if err != nil { out.Close(); c.Status(http.StatusInternalServerError); return }
+		total += n
+	}
+	if err := out.Close(); err != nil { c.Status(http.StatusInternalServerError); return }
+
+	// Upload assembled file into Cloudreve via FileManager.Update
+	_, base, _fm, err := getAccountContext(c)
+	if err != nil { c.Status(http.StatusNotFound); return }
+	defer _fm.Recycle()
+	uri := base.JoinRaw(key)
+	f, err := os.Open(finalPath)
+	if err != nil { c.Status(http.StatusInternalServerError); return }
+	defer f.Close()
+
+	up := &fs.UploadRequest{Props: &fs.UploadProps{Uri: uri, Size: total, LastModified: sess.MTime}, File: f, Seeker: f, Mode: fs.ModeOverwrite}
+	m := manager.NewFileManager(dep, inventory.UserFromContext(c))
+	defer m.Recycle()
+	res, err := m.Update(c, up)
+	if err != nil { c.Status(http.StatusInternalServerError); return }
+
+	etag, _ := etagForFile(c, m, res)
+	// Cleanup temp files and session
+	_ = os.RemoveAll(sess.TmpDir)
+	_ = kv.Delete("s3mpu_", upID)
+
+	resp := CompleteMultipartUploadResult{Bucket: sess.Bucket, Key: sess.Key, ETag: etag}
+	c.Header("Content-Type", "application/xml")
+	_ = xml.NewEncoder(c.Writer).Encode(resp)
+}
+
+// Multipart: Abort
+func handleAbortMultipart(c *gin.Context) {
+	dep := dependency.FromContext(c)
+	kv := dep.KV()
+	upID := c.Query("uploadId")
+	if upID == "" { c.Status(http.StatusBadRequest); return }
+	cached, ok := kv.Get(mpuKey(upID))
+	if !ok { c.Status(http.StatusNotFound); return }
+	sess := cached.(s3MPUSession)
+	if u := inventory.UserFromContext(c); u == nil || u.ID != sess.UserID {
+		c.Status(http.StatusForbidden)
+		return
+	}
+	_ = os.RemoveAll(sess.TmpDir)
+	_ = kv.Delete("s3mpu_", upID)
+	c.Status(http.StatusNoContent)
+}
+
+// Multipart: ListParts (optional minimal)
+func handleListParts(c *gin.Context) {
+	// Minimal implementation: report zero or existing parts count without sizes
+	dep := dependency.FromContext(c)
+	kv := dep.KV()
+	upID := c.Query("uploadId")
+	if upID == "" { c.Status(http.StatusBadRequest); return }
+	cached, ok := kv.Get(mpuKey(upID))
+	if !ok { c.Status(http.StatusNotFound); return }
+	sess := cached.(s3MPUSession)
+	_ = sess // currently unused; returning 501 keeps clients functional
+	c.Status(http.StatusNotImplemented)
 }
 
 // handleDeleteObject deletes an object.

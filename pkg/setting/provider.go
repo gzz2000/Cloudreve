@@ -168,6 +168,8 @@ type (
 		EmojiPresets(ctx context.Context) string
 		// MapSetting returns the EXIF GPS map related settings.
 		MapSetting(ctx context.Context) *MapSetting
+		// ColdBackup returns consolidated cold backup configuration.
+		ColdBackup(ctx context.Context) *ColdBackupConfig
 		// FolderPropsCacheTTL returns the cache TTL of folder summary.
 		FolderPropsCacheTTL(ctx context.Context) int
 		// FileViewers returns the file viewers settings.
@@ -662,6 +664,78 @@ func (s *settingProvider) SiteURL(ctx context.Context) *url.URL {
 	}
 
 	return urls[0]
+}
+
+func (s *settingProvider) ColdBackup(ctx context.Context) *ColdBackupConfig {
+	// default values
+	cfg := &ColdBackupConfig{
+		Enabled:           false,
+		RemoteRoot:        "/cloudreve-backups",
+		EncryptKey:        "",
+		WebDAVURL:         "",
+		WebDAVUsername:    "",
+		WebDAVPassword:    "",
+		WebDAVHeaders:     map[string]string{},
+		WebDAVInsecureTLS: false,
+		FilesPerRun:       500,
+		BytesPerRun:       21474836480, // 20 GiB
+		SegmentSize:       1073741824,  // 1 GiB
+		Concurrency:       2,
+		IncludeDB:         true,
+		DBMode:            "sqlite",
+		NextBlobID:        1,
+	}
+
+	raw := s.getString(ctx, "cold_backup_config", "")
+	if raw == "" {
+		return cfg
+	}
+	var loaded ColdBackupConfig
+	if err := json.Unmarshal([]byte(raw), &loaded); err != nil {
+		// return defaults on error
+		return cfg
+	}
+	// merge loaded into defaults for any zero-values where meaningful
+	if loaded.RemoteRoot != "" {
+		cfg.RemoteRoot = loaded.RemoteRoot
+	}
+	cfg.Enabled = loaded.Enabled
+	if loaded.EncryptKey != "" {
+		cfg.EncryptKey = loaded.EncryptKey
+	}
+	if loaded.WebDAVURL != "" {
+		cfg.WebDAVURL = loaded.WebDAVURL
+	}
+	if loaded.WebDAVUsername != "" {
+		cfg.WebDAVUsername = loaded.WebDAVUsername
+	}
+	if loaded.WebDAVPassword != "" {
+		cfg.WebDAVPassword = loaded.WebDAVPassword
+	}
+	if loaded.WebDAVHeaders != nil {
+		cfg.WebDAVHeaders = loaded.WebDAVHeaders
+	}
+	cfg.WebDAVInsecureTLS = loaded.WebDAVInsecureTLS
+	if loaded.FilesPerRun > 0 {
+		cfg.FilesPerRun = loaded.FilesPerRun
+	}
+	if loaded.BytesPerRun > 0 {
+		cfg.BytesPerRun = loaded.BytesPerRun
+	}
+	if loaded.SegmentSize > 0 {
+		cfg.SegmentSize = loaded.SegmentSize
+	}
+	if loaded.Concurrency > 0 {
+		cfg.Concurrency = loaded.Concurrency
+	}
+	cfg.IncludeDB = loaded.IncludeDB
+	if loaded.DBMode != "" {
+		cfg.DBMode = loaded.DBMode
+	}
+	if loaded.NextBlobID > 0 {
+		cfg.NextBlobID = loaded.NextBlobID
+	}
+	return cfg
 }
 
 func (s *settingProvider) SMTP(ctx context.Context) *SMTP {

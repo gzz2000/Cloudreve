@@ -111,6 +111,7 @@ var (
 	CronTypeEntityCollect    = CronType("entity_collect")
 	CronTypeTrashBinCollect  = CronType("trash_bin_collect")
 	CronTypeOauthCredRefresh = CronType("oauth_cred_refresh")
+	CronTypeColdBackup       = CronType("cold_backup")
 )
 
 type Theme struct {
@@ -220,4 +221,23 @@ type CustomHTML struct {
 	HeadlessFooter string `json:"headless_footer,omitempty"`
 	HeadlessBody   string `json:"headless_bottom,omitempty"`
 	SidebarBottom  string `json:"sidebar_bottom,omitempty"`
+}
+
+// ColdBackupConfig represents consolidated settings for cold backup.
+type ColdBackupConfig struct {
+	Enabled           bool              `json:"enabled"`
+	RemoteRoot        string            `json:"remote_root"`
+	EncryptKey        string            `json:"encrypt_key"`
+	WebDAVURL         string            `json:"webdav_url"`
+	WebDAVUsername    string            `json:"webdav_username"`
+	WebDAVPassword    string            `json:"webdav_password"`
+	WebDAVHeaders     map[string]string `json:"webdav_headers"`
+	WebDAVInsecureTLS bool              `json:"webdav_insecure_tls"`
+	FilesPerRun       int               `json:"files_per_run"`
+	BytesPerRun       int64             `json:"bytes_per_run"`
+	SegmentSize       int64             `json:"segment_size"`
+	Concurrency       int               `json:"concurrency"`
+	IncludeDB         bool              `json:"include_db"`
+	DBMode            string            `json:"db_mode"`
+	NextBlobID        int               `json:"next_to_upload_blob_id"`
 }

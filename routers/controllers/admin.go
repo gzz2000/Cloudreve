@@ -85,6 +85,16 @@ func AdminGetQueueMetrics(c *gin.Context) {
 	c.JSON(200, serializer.Response{Data: res})
 }
 
+// AdminRunColdBackup manually enqueues a cold backup task
+func AdminRunColdBackup(c *gin.Context) {
+	res, err := admin.AdminRunColdBackup(c)
+	if err != nil {
+		c.JSON(200, serializer.Err(c, err))
+		return
+	}
+	c.JSON(200, serializer.Response{Data: res})
+}
+
 func AdminListPolicies(c *gin.Context) {
 	service := ParametersFromContext[*admin.AdminListService](c, admin.AdminListServiceParamsCtx{})
 	res, err := service.Policies(c)

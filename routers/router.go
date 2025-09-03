@@ -845,6 +845,7 @@ func initMasterRouter(dep dependency.Dep) *gin.Engine {
 					tool.DELETE("entityUrlCache",
 						controllers.AdminClearEntityUrlCache,
 					)
+					tool.POST("coldbackup/run", controllers.AdminRunColdBackup)
 				}
 
 				queue := admin.Group("queue")

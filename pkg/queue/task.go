@@ -104,6 +104,7 @@ const (
 	RelocateTaskType              = "relocate"
 	RemoteDownloadTaskType        = "remote_download"
 	ImportTaskType                = "import"
+	ColdBackupTaskType            = "cold_backup"
 
 	SlaveCreateArchiveTaskType = "slave_create_archive"
 	SlaveUploadTaskType        = "slave_upload"

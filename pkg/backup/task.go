@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -17,6 +18,7 @@ import (
 	"github.com/cloudreve/Cloudreve/v4/ent/task"
 	"github.com/cloudreve/Cloudreve/v4/inventory"
 	"github.com/cloudreve/Cloudreve/v4/inventory/types"
+	"github.com/cloudreve/Cloudreve/v4/pkg/backup/webdav"
 	"github.com/cloudreve/Cloudreve/v4/pkg/conf"
 	"github.com/cloudreve/Cloudreve/v4/pkg/crontab"
 	"github.com/cloudreve/Cloudreve/v4/pkg/filemanager/manager"
@@ -25,7 +27,6 @@ import (
 	"github.com/cloudreve/Cloudreve/v4/pkg/queue"
 	"github.com/cloudreve/Cloudreve/v4/pkg/setting"
 	"github.com/cloudreve/Cloudreve/v4/pkg/util"
-	"github.com/cloudreve/Cloudreve/v4/pkg/backup/webdav"
 )
 
 type (
@@ -105,6 +106,15 @@ func NewColdBackupTask(ctx context.Context) (queue.Task, error) {
 func (t *ColdBackupTask) Do(ctx context.Context) (task.Status, error) {
 	dep := dependency.FromContext(ctx)
 	cfg := dep.SettingProvider().ColdBackup(ctx)
+	// Force-refresh NextBlobID from DB to avoid stale KV cache causing watermark rollback on retries.
+	if raw, err := dep.SettingClient().Get(ctx, "cold_backup_config"); err == nil && raw != "" {
+		var loaded setting.ColdBackupConfig
+		if jsonErr := json.Unmarshal([]byte(raw), &loaded); jsonErr == nil {
+			if loaded.NextBlobID > 0 {
+				cfg.NextBlobID = loaded.NextBlobID
+			}
+		}
+	}
 	if cfg == nil || !cfg.Enabled {
 		return task.StatusCompleted, nil
 	}
@@ -204,7 +214,7 @@ func (t *ColdBackupTask) Do(ctx context.Context) (task.Status, error) {
 			for i := 0; i < segments; i++ {
 				name := fmt.Sprintf("%d.p%04d.enc", e.ID, i+1)
 				expected := segSize
-				if rem := total-int64(i)*segSize; rem < segSize {
+				if rem := total - int64(i)*segSize; rem < segSize {
 					expected = rem
 				}
 				if sz, ok := existing[name]; ok && sz == expected {
@@ -218,7 +228,7 @@ func (t *ColdBackupTask) Do(ctx context.Context) (task.Status, error) {
 			if start > 0 {
 				lastIndex := start - 1
 				lastExpected := segSize
-				if rem := total-int64(lastIndex)*segSize; rem < segSize {
+				if rem := total - int64(lastIndex)*segSize; rem < segSize {
 					lastExpected = rem
 				}
 				preBytes -= lastExpected
@@ -240,28 +250,73 @@ func (t *ColdBackupTask) Do(ctx context.Context) (task.Status, error) {
 				if remaining := total - offset; remaining < segSize {
 					length = remaining
 				}
-				// seek and build reader
-				if _, err := es.Seek(offset, io.SeekStart); err != nil {
-					firstErr = fmt.Errorf("seek failed for entity %d: %w", e.ID, err)
-					break
-				}
-				limited := io.LimitReader(es, length)
-				iv, _ := deriveIV(key, []byte(fmt.Sprintf("%d:%d", e.ID, i)))
-				encReader, err := newCTRReader(limited, key, iv)
-				if err != nil {
-					firstErr = fmt.Errorf("encrypt reader failed for entity %d: %w", e.ID, err)
-					break
-				}
-				// progress callback
-				progressReader := util.NewCallbackReader(encReader, func(n int64) {
-					if p := t.progress["upload"]; p != nil {
-						p.Current += n
-					}
-				})
 				name := fmt.Sprintf("%d.p%04d.enc", e.ID, i+1)
 				remote := path.Join(root, "blobs", strconv.Itoa(e.ID), name)
-				if err := wd.Put(ctx, remote, progressReader, length); err != nil {
-					firstErr = fmt.Errorf("upload failed for %s: %w", remote, err)
+				maxAttempts := 6
+				backoff := time.Second
+				for attempt := 1; attempt <= maxAttempts; attempt++ {
+					// seek and build reader per attempt
+					if _, err := es.Seek(offset, io.SeekStart); err != nil {
+						firstErr = fmt.Errorf("seek failed for entity %d: %w", e.ID, err)
+						break
+					}
+					limited := io.LimitReader(es, length)
+					iv, _ := deriveIV(key, []byte(fmt.Sprintf("%d:%d", e.ID, i)))
+					encReader, err := newCTRReader(limited, key, iv)
+					if err != nil {
+						firstErr = fmt.Errorf("encrypt reader failed for entity %d: %w", e.ID, err)
+						break
+					}
+
+					// prime a small head to avoid 0-byte first read mismatches
+					headSize := int64(32 * 1024)
+					if length < headSize {
+						headSize = length
+					}
+					var headBuf bytes.Buffer
+					if headSize > 0 {
+						if _, err := io.CopyN(&headBuf, encReader, headSize); err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+							firstErr = fmt.Errorf("prime read failed for entity %d: %w", e.ID, err)
+							break
+						}
+					}
+					body := io.MultiReader(bytes.NewReader(headBuf.Bytes()), encReader)
+					attemptRead := int64(0)
+					progressReader := util.NewCallbackReader(body, func(n int64) {
+						attemptRead += n
+						if p := t.progress["upload"]; p != nil {
+							p.Current += n
+						}
+					})
+
+					if err := wd.Put(ctx, remote, progressReader, length); err != nil {
+						// rollback progress added in this failed attempt
+						if p := t.progress["upload"]; p != nil && attemptRead > 0 {
+							p.Current -= attemptRead
+							if p.Current < 0 {
+								p.Current = 0
+							}
+						}
+						if attempt == maxAttempts {
+							firstErr = fmt.Errorf("upload failed for %s after %d attempts: %w", remote, attempt, err)
+							break
+						}
+						select {
+						case <-time.After(backoff):
+							if backoff < 10*time.Second {
+								backoff *= 2
+							}
+							continue
+						case <-ctx.Done():
+							firstErr = ctx.Err()
+							break
+						}
+					}
+
+					// success
+					break
+				}
+				if firstErr != nil {
 					break
 				}
 				uploadedBytes += length
@@ -282,7 +337,10 @@ func (t *ColdBackupTask) Do(ctx context.Context) (task.Status, error) {
 			// append to existing state stored in t.Task.PrivateState (best-effort)
 			// we'll overwrite later with the final state as well
 			// note: we don't re-marshal every time to avoid overhead; collect into local slice
-			uploadedList = append(uploadedList, struct{ ID int; Size int64 }{ID: e.ID, Size: e.Size})
+			uploadedList = append(uploadedList, struct {
+				ID   int
+				Size int64
+			}{ID: e.ID, Size: e.Size})
 		}
 		if len(batch) > 0 {
 			candidateID = batch[len(batch)-1].ID + 1
@@ -308,7 +366,9 @@ func (t *ColdBackupTask) Do(ctx context.Context) (task.Status, error) {
 
 	// Estimate remaining backlog
 	remainingFiles, _ := client.Entity.Query().Where(entity.IDGTE(cfg.NextBlobID), entity.TypeEQ(int(types.EntityTypeVersion))).Count(ctx)
-	var sumRes []struct{ Sum int64 `json:"sum"` }
+	var sumRes []struct {
+		Sum int64 `json:"sum"`
+	}
 	_ = client.Entity.Query().Where(entity.IDGTE(cfg.NextBlobID), entity.TypeEQ(int(types.EntityTypeVersion))).Select().Aggregate(ent.Sum(entity.FieldSize)).Scan(ctx, &sumRes)
 	remainingBytes := int64(0)
 	if len(sumRes) > 0 {
@@ -323,10 +383,19 @@ func (t *ColdBackupTask) Do(ctx context.Context) (task.Status, error) {
 		RemainingFiles: remainingFiles,
 		RemainingBytes: remainingBytes,
 		DBBackupDone:   dbDone,
-		UploadedList:   func() []struct{ ID int `json:"id"`; Size int64 `json:"size"` } {
-			res := make([]struct{ ID int `json:"id"`; Size int64 `json:"size"` }, 0, len(uploadedList))
+		UploadedList: func() []struct {
+			ID   int   `json:"id"`
+			Size int64 `json:"size"`
+		} {
+			res := make([]struct {
+				ID   int   `json:"id"`
+				Size int64 `json:"size"`
+			}, 0, len(uploadedList))
 			for _, it := range uploadedList {
-				res = append(res, struct{ ID int `json:"id"`; Size int64 `json:"size"` }{ID: it.ID, Size: it.Size})
+				res = append(res, struct {
+					ID   int   `json:"id"`
+					Size int64 `json:"size"`
+				}{ID: it.ID, Size: it.Size})
 			}
 			return res
 		}(),

@@ -10,6 +10,12 @@ import (
 // AdminRunColdBackup enqueues a cold backup task manually.
 func AdminRunColdBackup(c *gin.Context) (any, error) {
 	dep := dependency.FromContext(c)
+	// Prevent duplicate cold backup tasks
+	if dep.TaskClient() != nil {
+		if tasks, err := dep.TaskClient().GetPendingTasks(c, "cold_backup"); err == nil && len(tasks) > 0 {
+			return gin.H{"ok": true, "skipped": true}, nil
+		}
+	}
 	// create task
 	t, err := backup.NewColdBackupTask(c)
 	if err != nil {
@@ -20,4 +26,3 @@ func AdminRunColdBackup(c *gin.Context) (any, error) {
 	}
 	return gin.H{"ok": true}, nil
 }
-

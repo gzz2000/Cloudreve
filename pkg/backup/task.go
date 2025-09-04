@@ -63,6 +63,14 @@ func init() {
 			return
 		}
 
+		// Prevent duplicate cold backup tasks: skip if any pending exists
+		if dep.TaskClient() != nil {
+			if tasks, err := dep.TaskClient().GetPendingTasks(ctx, queue.ColdBackupTaskType); err == nil && len(tasks) > 0 {
+				l.Info("Cold backup task already pending (%d), skip cron enqueue.", len(tasks))
+				return
+			}
+		}
+
 		t, err := NewColdBackupTask(ctx)
 		if err != nil {
 			l.Error("Failed to create cold backup task: %s", err)
@@ -106,6 +114,20 @@ func NewColdBackupTask(ctx context.Context) (queue.Task, error) {
 func (t *ColdBackupTask) Do(ctx context.Context) (task.Status, error) {
 	dep := dependency.FromContext(ctx)
 	cfg := dep.SettingProvider().ColdBackup(ctx)
+	// Ensure no other cold backup task is running simultaneously (re-check inside worker)
+	if dep.TaskClient() != nil {
+		if tasks, err := dep.TaskClient().GetPendingTasks(ctx, queue.ColdBackupTaskType); err == nil {
+			others := 0
+			for _, tt := range tasks {
+				if tt.ID != t.ID() {
+					others++
+				}
+			}
+			if others > 0 {
+				return task.StatusError, queue.CriticalErr // do not retry
+			}
+		}
+	}
 	// Force-refresh NextBlobID from DB to avoid stale KV cache causing watermark rollback on retries.
 	if raw, err := dep.SettingClient().Get(ctx, "cold_backup_config"); err == nil && raw != "" {
 		var loaded setting.ColdBackupConfig

@@ -90,6 +90,8 @@ func (c *Client) EnsureDir(ctx context.Context, path string) error {
 
 // Put uploads a file to remote path via HTTP PUT, streaming from reader.
 func (c *Client) Put(ctx context.Context, path string, r io.Reader, length int64) error {
+	// Do not retry here because the reader is one-shot streaming.
+	// Retries should be handled by the caller by recreating the reader.
 	u, err := c.buildURL(path)
 	if err != nil {
 		return err
@@ -107,17 +109,15 @@ func (c *Client) Put(ctx context.Context, path string, r io.Reader, length int64
 	for k, v := range c.Headers {
 		req.Header.Set(k, v)
 	}
-	return c.doWithRetry(ctx, func() error {
-		resp, err := c.client().Do(req)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			return nil
-		}
-		return &httpError{StatusCode: resp.StatusCode}
-	})
+	resp, err := c.client().Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		return nil
+	}
+	return &httpError{StatusCode: resp.StatusCode}
 }
 
 type httpError struct{ StatusCode int }
@@ -165,67 +165,67 @@ func (c *Client) doWithRetry(ctx context.Context, fn func() error) error {
 // ListDir lists files under a directory (name -> size) using PROPFIND depth=1.
 func (c *Client) ListDir(ctx context.Context, dir string) (map[string]int64, error) {
 	u, err := c.buildURL(dir)
- 	if err != nil {
- 		return nil, err
- 	}
- 	body := `<?xml version="1.0" encoding="utf-8" ?>
+	if err != nil {
+		return nil, err
+	}
+	if !strings.HasSuffix(u, "/") {
+		u = u + "/"
+	}
+	var parsed multistatus
+	err = c.doWithRetry(ctx, func() error {
+		body := `<?xml version="1.0" encoding="utf-8" ?>
 <d:propfind xmlns:d="DAV:">
   <d:prop>
     <d:displayname />
     <d:getcontentlength />
   </d:prop>
 </d:propfind>`
- 	req, err := http.NewRequestWithContext(ctx, "PROPFIND", u, strings.NewReader(body))
- 	if err != nil {
- 		return nil, err
- 	}
- 	req.Header.Set("Depth", "1")
- 	req.Header.Set("Content-Type", "application/xml; charset=utf-8")
- 	if c.Username != "" || c.Password != "" {
- 		req.SetBasicAuth(c.Username, c.Password)
- 	}
- 	for k, v := range c.Headers {
- 		req.Header.Set(k, v)
- 	}
- 	var parsed multistatus
- 	err = c.doWithRetry(ctx, func() error {
- 		resp, err := c.client().Do(req)
- 		if err != nil {
- 			return err
- 		}
- 		defer resp.Body.Close()
- 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
- 			return &httpError{StatusCode: resp.StatusCode}
- 		}
- 		dec := xml.NewDecoder(resp.Body)
- 		if err := dec.Decode(&parsed); err != nil {
- 			return err
- 		}
- 		return nil
- 	})
- 	if err != nil {
- 		return nil, err
- 	}
- 	res := map[string]int64{}
- 	for _, r := range parsed.Responses {
- 		name := r.PropStat.Prop.DisplayName
- 		if name == "" {
- 			// try to extract from href
- 			if idx := strings.LastIndex(r.Href, "/"); idx >= 0 && idx < len(r.Href)-1 {
- 				name = r.Href[idx+1:]
- 			}
- 		}
- 		if name == "" || name == "." || name == ".." {
- 			continue
- 		}
- 		// skip the directory entry itself
- 		if strings.HasSuffix(r.Href, "/") {
- 			// a collection, skip
- 			continue
- 		}
- 		res[name] = r.PropStat.Prop.ContentLength
- 	}
- 	return res, nil
+		req, err := http.NewRequestWithContext(ctx, "PROPFIND", u, strings.NewReader(body))
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Depth", "1")
+		req.Header.Set("Content-Type", "application/xml; charset=utf-8")
+		if c.Username != "" || c.Password != "" {
+			req.SetBasicAuth(c.Username, c.Password)
+		}
+		for k, v := range c.Headers {
+			req.Header.Set(k, v)
+		}
+		resp, err := c.client().Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			return &httpError{StatusCode: resp.StatusCode}
+		}
+		dec := xml.NewDecoder(resp.Body)
+		if err := dec.Decode(&parsed); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	res := map[string]int64{}
+	for _, r := range parsed.Responses {
+		name := r.PropStat.Prop.DisplayName
+		if name == "" {
+			if idx := strings.LastIndex(r.Href, "/"); idx >= 0 && idx < len(r.Href)-1 {
+				name = r.Href[idx+1:]
+			}
+		}
+		if name == "" || name == "." || name == ".." {
+			continue
+		}
+		if strings.HasSuffix(r.Href, "/") {
+			continue
+		}
+		res[name] = r.PropStat.Prop.ContentLength
+	}
+	return res, nil
 }
 
 // Minimal XML structs for PROPFIND parsing
